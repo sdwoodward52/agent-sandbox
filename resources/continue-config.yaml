@@ -1,0 +1,25 @@
+name: Antigravity Sandbox Autocomplete
+version: 1.0.0
+schema: v1
+models:
+  - name: Gemini Flash-Lite Auto-Fallback (__FALLBACK_CHAIN__)
+    provider: gemini
+    model: __AUTOCOMPLETE_MODEL__
+    apiBase: http://127.0.0.1:11435/v1beta/
+    apiKey: ${{ secrets.GEMINI_API_KEY }}
+    roles:
+      - autocomplete
+  - name: Gemini 2.5 Flash (Fast Direct Fallback)
+    provider: gemini
+    model: gemini-2.5-flash
+    apiBase: http://127.0.0.1:11435/v1beta/
+    apiKey: ${{ secrets.GEMINI_API_KEY }}
+    roles:
+      - autocomplete
+  - name: Gemini 3.6 Flash (Direct Fallback)
+    provider: gemini
+    model: gemini-3.6-flash
+    apiBase: http://127.0.0.1:11435/v1beta/
+    apiKey: ${{ secrets.GEMINI_API_KEY }}
+    roles:
+      - autocomplete

@@ -1,0 +1,190 @@
+#!/bin/bash
+#
+# Wrapper for /usr/bin/git inside Antigravity Sandbox.
+# Replaces cryptic ".git/index.lock: Read-only file system" errors on read-only
+# .git mounts with a clear explanation to run Git write operations on the host.
+
+set -uo pipefail
+
+readonly REAL_GIT="/usr/bin/git"
+
+#######################################
+# Print a read-only Git error message and exit with code 128.
+# Arguments:
+#   Git operation/subcommand name.
+# Outputs:
+#   Writes error and hint messages to stderr.
+# Returns:
+#   Exits with status 128.
+#######################################
+print_ro_error() {
+  local op="${1:-git}"
+  echo "fatal: Git write operation ('git ${op}') is disabled inside the sandbox (.git is mounted read-only)." >&2
+  echo "hint: Run Git write operations (add, commit, checkout, branch, push, etc.) from your host terminal." >&2
+  exit 128
+}
+
+#######################################
+# Check if git branch or tag command invocation is strictly read-only.
+# Arguments:
+#   Command ("branch" or "tag") followed by flags/arguments.
+# Returns:
+#   0 if read-only, 1 if mutating.
+#######################################
+is_readonly_branch_or_tag() {
+  local cmd="$1"
+  shift
+  if (( $# == 0 )); then
+    return 0
+  fi
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      -d|-D|--delete|-m|-M|--move|-c|-C|--copy|--set-upstream-to=*|-u|--unset-upstream|--edit-description|-f|--force|--annotate|-s|--sign)
+        return 1
+        ;;
+      -a)
+        if [[ "${cmd}" == "tag" ]]; then
+          return 1
+        fi
+        return 0
+        ;;
+      -l|--list|-r|--remotes|--all|--show-current|-v|-vv|--verbose|--contains|--merged|--no-merged|--points-at|--sort=*|--format=*|--color*|--no-color|--column*|--no-column|--abbrev*|--no-abbrev)
+        return 0
+        ;;
+      -*)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
+#######################################
+# Check if a git subcommand performs mutating write operations.
+# Arguments:
+#   Subcommand name followed by arguments.
+# Returns:
+#   0 if mutating, 1 if read-only.
+#######################################
+is_mutating_subcommand() {
+  local cmd="$1"
+  shift
+  case "${cmd}" in
+    add|stage|commit|push|pull|fetch|merge|rebase|cherry-pick|revert|reset|checkout|switch|restore|stash|clean|rm|mv|am|apply|gc|prune|worktree|hook|send-pack|http-push|receive-pack)
+      return 0
+      ;;
+    branch|tag)
+      if is_readonly_branch_or_tag "${cmd}" "$@"; then
+        return 1
+      fi
+      return 0
+      ;;
+    remote)
+      if (( $# == 0 )) || [[ "${1:-}" == "-v" || "${1:-}" == "--verbose" || "${1:-}" == "show" || "${1:-}" == "get-url" ]]; then
+        return 1
+      fi
+      return 0
+      ;;
+    config)
+      local arg
+      for arg in "$@"; do
+        case "${arg}" in
+          --get|--get-all|--get-regexp|--list|-l) return 1 ;;
+        esac
+      done
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+#######################################
+# Intercept Git commands to prevent EROFS lock file errors on read-only .git mounts.
+# Arguments:
+#   All command-line arguments to git.
+#######################################
+main() {
+  local -a pre_args=()
+  local subcmd=""
+  local -a subcmd_args=()
+
+  local -i idx=1
+  local -i total=$#
+  local -a args=("$@")
+
+  while (( idx <= total )); do
+    local tok="${args[idx - 1]}"
+    if [[ "${tok}" == "--" ]]; then
+      (( idx += 1 ))
+      if (( idx <= total )); then
+        subcmd="${args[idx - 1]}"
+        (( idx += 1 ))
+      fi
+      break
+    fi
+    case "${tok}" in
+      -C|-c|--git-dir|--work-tree|--namespace|--exec-path|--config-env)
+        pre_args+=("${tok}")
+        (( idx += 1 ))
+        if (( idx <= total )); then
+          pre_args+=("${args[idx - 1]}")
+        fi
+        (( idx += 1 ))
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--exec-path=*|--config-env=*|-c*|-C*)
+        pre_args+=("${tok}")
+        (( idx += 1 ))
+        ;;
+      -*)
+        pre_args+=("${tok}")
+        (( idx += 1 ))
+        ;;
+      *)
+        subcmd="${tok}"
+        (( idx += 1 ))
+        break
+        ;;
+    esac
+  done
+
+  while (( idx <= total )); do
+    subcmd_args+=("${args[idx - 1]}")
+    (( idx += 1 ))
+  done
+
+  if [[ -n "${subcmd}" ]]; then
+    local git_dir
+    git_dir="$("${REAL_GIT}" ${pre_args[@]+"${pre_args[@]}"} rev-parse --absolute-git-dir 2>/dev/null || true)"
+    if [[ -n "${git_dir}" && -e "${git_dir}" && ! -w "${git_dir}" ]]; then
+      if is_mutating_subcommand "${subcmd}" ${subcmd_args[@]+"${subcmd_args[@]}"}; then
+        print_ro_error "${subcmd}"
+      fi
+
+      # Execute read-only git command with --no-optional-locks; if it still hits EROFS on .git, show friendly message.
+      local err_file
+      err_file="$(mktemp /tmp/agy-git-err.XXXXXX 2>/dev/null || echo "")"
+      if [[ -n "${err_file}" ]]; then
+        local -i rc=0
+        "${REAL_GIT}" --no-optional-locks "$@" 2>"${err_file}" || rc=$?
+        if (( rc != 0 )) && grep -qE "Read-only file system|Unable to create '.*\\.git/" "${err_file}" 2>/dev/null; then
+          rm -f "${err_file}"
+          print_ro_error "${subcmd}"
+        fi
+        if [[ -s "${err_file}" ]]; then
+          cat "${err_file}" >&2
+        fi
+        rm -f "${err_file}"
+        exit "${rc}"
+      fi
+    fi
+  fi
+
+  exec "${REAL_GIT}" --no-optional-locks "$@"
+}
+
+main "$@"

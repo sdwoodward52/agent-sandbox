@@ -1,0 +1,92 @@
+services:
+  egress-proxy:
+    build:
+      context: ./proxy
+      dockerfile: Dockerfile
+    image: antigravity-egress-proxy:latest
+    container_name: agy-egress-proxy
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CODE_SERVER_PORT:-8443}:8443"
+    volumes:
+      - ./proxy/squid.conf:/etc/squid/squid.conf:ro
+      - ./proxy/blocked_domains.txt:/etc/squid/blocked_domains.txt:ro
+    networks:
+      - agent_internal
+      - external_egress
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "squid -k check || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  agent-sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        AGY_CACHEBUST: ${AGY_CACHEBUST:-initial}
+    image: antigravity-sandbox:latest
+    container_name: agy-agent-sandbox
+    restart: unless-stopped
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:exec,mode=1777,size=2g
+      - /run:mode=0755,size=64m
+      - /home/agent/.cache:uid=1000,gid=1000,mode=0755,size=2g
+      - /home/agent/.config:uid=1000,gid=1000,mode=0755,size=128m
+      - /home/agent/.local/state:uid=1000,gid=1000,mode=0755,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - HTTP_PROXY=http://egress-proxy:3128
+      - HTTPS_PROXY=http://egress-proxy:3128
+      - http_proxy=http://egress-proxy:3128
+      - https_proxy=http://egress-proxy:3128
+      - PIP_PROXY=http://egress-proxy:3128
+      - NO_PROXY=localhost,127.0.0.1,egress-proxy
+      - no_proxy=localhost,127.0.0.1,egress-proxy
+      - HISTFILE=/tmp/.bash_history
+      - GIT_CONFIG_GLOBAL=/dev/null
+      - GIT_CONFIG_PARAMETERS='core.hooksPath=/home/agent/.gemini/empty-hooks'
+      - GIT_OPTIONAL_LOCKS=0
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ${SANDBOX_STATE_DIR:-${HOME}/.antigravity-sandbox/state}/empty-hooks:/home/agent/.gemini/empty-hooks:ro
+      - ${SANDBOX_STATE_DIR:-${HOME}/.antigravity-sandbox/state}/gemini:/home/agent/.gemini:rw
+      - ${SANDBOX_STATE_DIR:-${HOME}/.antigravity-sandbox/state}/code-server:/home/agent/.local/share/code-server:rw
+      - ${SANDBOX_STATE_DIR:-${HOME}/.antigravity-sandbox/state}/continue:/home/agent/.continue:rw
+      - ${SKILLS_DIR:-${HOME}/antigravity_workspace/agents/skills}:/home/agent/.gemini/config/skills:ro
+      - ./hooks/hooks.json:/home/agent/.gemini/config/hooks.json:ro
+      - ./hooks/pre_tool_guard.py:/home/agent/.gemini/config/pre_tool_guard.py:ro
+      - ./vendor:/opt/agy-vendor:ro
+    networks:
+      - agent_internal
+
+networks:
+  # Strictly internal network: Linux kernel drops all direct traffic to LAN, host.docker.internal, or WAN
+  agent_internal:
+    driver: bridge
+    internal: true
+  # External bridge used exclusively by egress-proxy
+  external_egress:
+    driver: bridge

@@ -1,0 +1,18 @@
+{
+  "id": "__PROJECT_NAME__",
+  "name": "__PROJECT_NAME__",
+  "permissionPreset": "Turbo",
+  "agentMode": "auto",
+  "autoExecutionPolicy": "always-proceed",
+  "projectResources": {
+    "resources": [
+      {
+        "gitFolder": {
+          "folderUri": "file:///workspaces/__PROJECT_NAME__",
+          "defaultBranch": "main",
+          "allowWrite": true
+        }
+      }
+    ]
+  }
+}

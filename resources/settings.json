@@ -1,0 +1,12 @@
+{
+    "telemetry.telemetryLevel": "off",
+    "workbench.startupEditor": "none",
+    "git.enabled": true,
+    "git.autorefresh": true,
+    "security.workspace.trust.enabled": false,
+    "remote.autoForwardPorts": false,
+    "remote.restoreForwardedPorts": false,
+    "editor.inlineSuggest.enabled": true,
+    "continue.enableTabAutocomplete": true,
+    "continue.telemetryEnabled": false
+}

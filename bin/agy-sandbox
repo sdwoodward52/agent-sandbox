@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# agy-sandbox: Trusted macOS Host CLI for managing the Antigravity Sandbox Pod.
+# Usage: agy-sandbox <up|down|update|verify-isolation|auth|list|shell>
+
+set -euo pipefail
+
+export AGY_CLI_NAME="agy-sandbox"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LIB_DIR="$(cd "${SCRIPT_DIR}/../lib" && pwd -P)"
+
+source "${LIB_DIR}/commands/sandbox.sh"
+source "${LIB_DIR}/commands/agy.sh"
+source "${LIB_DIR}/commands/testing.sh"
+
+#######################################
+# Dispatcher for agy-sandbox CLI commands.
+# Arguments:
+#   Command name and options.
+#######################################
+main() {
+  case "${1:-help}" in
+    up)
+      shift
+      cmd_up "$@"
+      ;;
+    down)
+      shift
+      cmd_down "$@"
+      ;;
+    update)
+      shift
+      cmd_update "$@"
+      ;;
+    verify-isolation|verify)
+      shift
+      cmd_verify_isolation "$@"
+      ;;
+    auth|login)
+      shift
+      cmd_auth "$@"
+      ;;
+    list)
+      shift
+      cmd_list "$@"
+      ;;
+    shell)
+      shift
+      cmd_shell "$@"
+      ;;
+    *)
+      echo "Usage: agy-sandbox <command>"
+      echo ""
+      echo "Pod & Infrastructure Commands:"
+      echo "  up [--rebuild] [dir]                Ensure sandbox pod is running with active mounts"
+      echo "  down                                Stop sandbox pod"
+      echo "  update                              Fast-update the 'agy' CLI inside the sandbox and restore remote sessions"
+      echo "  verify-isolation (or verify)        Run automated security & isolation test suite"
+      echo "  auth|login [-i|--import-host] [dir] Interactive one-time authentication for Antigravity CLI"
+      echo "  auth --api-key <KEY>                Configure Gemini API key for Continue Tab Autocomplete"
+      echo "  list                                List all registered repositories and their URLs"
+      echo "  shell [dir]                         Open an interactive bash shell inside the sandbox (UID 1000)"
+      echo ""
+      echo "For daily repository & session workflows (start, init, status, ide, chat), use 'agy-workflow'."
+      ;;
+  esac
+}
+
+main "$@"

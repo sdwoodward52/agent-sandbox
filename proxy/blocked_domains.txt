@@ -1,0 +1,16 @@
+# Docker Host & Internal Gateway Aliases
+host.docker.internal
+gateway.docker.internal
+kubernetes.docker.internal
+
+# Microsoft / VS Code / GitHub Copilot Telemetry & AI Subprocessors
+.microsoft.com
+.visualstudio.com
+.githubcopilot.com
+.vsassets.io
+.sfx.ms
+.applicationinsights.io
+.monitor.azure.com
+
+# Optional: Add internal corporate domains or Git hosts below to hard-block at the proxy
+# .internal.corp.example.com

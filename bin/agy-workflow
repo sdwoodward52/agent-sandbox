@@ -1,0 +1,60 @@
+#!/bin/bash
+#
+# agy-workflow: Trusted macOS Host CLI for daily Antigravity repository workflows.
+# Usage: agy-workflow <start|init|status|ide|chat>
+
+set -euo pipefail
+
+export AGY_CLI_NAME="agy-workflow"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LIB_DIR="$(cd "${SCRIPT_DIR}/../lib" && pwd -P)"
+
+source "${LIB_DIR}/commands/sandbox.sh"
+source "${LIB_DIR}/commands/source_control.sh"
+source "${LIB_DIR}/commands/ide.sh"
+source "${LIB_DIR}/commands/agy.sh"
+
+#######################################
+# Dispatcher for agy-workflow CLI commands.
+# Arguments:
+#   Command name and options.
+#######################################
+main() {
+  case "${1:-help}" in
+    start)
+      shift
+      cmd_start "$@"
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    status)
+      shift
+      cmd_status "$@"
+      ;;
+    ide)
+      shift
+      cmd_ide "$@"
+      ;;
+    chat)
+      shift
+      cmd_chat "$@"
+      ;;
+    *)
+      echo "Usage: agy-workflow <command>"
+      echo ""
+      echo "Repository & Session Commands:"
+      echo "  start [--app|--native] [--tui] [--no-remote] [dir] All-in-one: register repo + pod up + IDE + chat"
+      echo "  init [dir]                                         Register host repo with direct source mount & read-only metadata guards"
+      echo "  status [-c|--compact]                              Show sandbox status and host git status"
+      echo "  ide [--app|--native|--browser] [dir]               Open code-server Web IDE or native macOS IDE"
+      echo "  chat [--app|--tui] [-r|--restart] [dir]            Open Antigravity chat UI (browser/app window, or terminal TUI)"
+      echo ""
+      echo "For pod infrastructure & admin commands (up, down, update, verify-isolation, auth, list, shell), use 'agy-sandbox'."
+      ;;
+  esac
+}
+
+main "$@"
