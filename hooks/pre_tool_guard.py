@@ -260,9 +260,25 @@ def _is_git_config_file_path(parts_lower: set[str]) -> bool:
     )
 
 
+ANTIGRAVITY_BRAIN_ROOT = "/home/agent/.gemini/antigravity/brain"
+
+
+def _is_antigravity_brain_path(abs_path: str, real_path: str) -> bool:
+    """Return True if both abs_path and real_path resolve inside the artifacts brain directory."""
+    abs_norm = abs_path.replace("\\", "/").rstrip("/")
+    real_norm = real_path.replace("\\", "/").rstrip("/")
+    brain_real = os.path.realpath(ANTIGRAVITY_BRAIN_ROOT).replace("\\", "/").rstrip("/")
+    return (
+        abs_norm.startswith(ANTIGRAVITY_BRAIN_ROOT + "/")
+        and real_norm.startswith(brain_real + "/")
+    )
+
+
 def _is_sandbox_configuration_path(
     parts_lower: set[str], normalized_path: str, real_path: str
 ) -> bool:
+    if _is_antigravity_brain_path(normalized_path, real_path):
+        return False
     return (
         ".gemini" in parts_lower
         or normalized_path.startswith("/home/agent/.gemini")
@@ -394,7 +410,8 @@ def _check_file_path(
     if _is_git_config_file_path(all_parts_lower):
         return f"Modifying Git configuration file '{path_value}' is forbidden."
 
-    if _is_sandbox_configuration_path(all_parts_lower, normalized, real_path):
+    abs_path_norm = abs_path.replace("\\", "/")
+    if _is_sandbox_configuration_path(all_parts_lower, abs_path_norm, real_path):
         return "Modifying sandbox configuration, skills, or hooks is forbidden."
 
     if _is_code_server_state_path(all_parts_lower):
@@ -413,6 +430,15 @@ def _check_file_path(
 
     if ".." in raw_parts or ".." in norm_parts:
         return f"Path traversal ('..') in file path '{path_value}' is forbidden."
+
+    if _is_antigravity_brain_path(abs_path_norm, real_path):
+        rel = abs_path_norm[len(ANTIGRAVITY_BRAIN_ROOT) :].lstrip("/")
+        probe = ANTIGRAVITY_BRAIN_ROOT
+        for part in rel.split("/"):
+            probe = os.path.join(probe, part)
+            if os.path.islink(probe):
+                return f"Writing through symlink '{probe}' is forbidden."
+        return None
 
     ws_info_norm = _extract_workspaces_repo(abs_path)
     ws_info_real = _extract_workspaces_repo(real_path)
@@ -631,12 +657,22 @@ def _matches_git_config_token(tok: str) -> bool:
 
 
 def _matches_protected_sandbox_state_token(tok: str) -> bool:
+    tok_to_check = tok
+    if ".." not in tok:
+        # Allow referencing the antigravity artifacts/scratch directory in shell commands
+        # while still blocking any other ~/.gemini or /home/agent/.gemini reference.
+        tok_to_check = re.sub(
+            r"(?:/home/agent/|~/)\.gemini/antigravity/brain(?:/[^\s'\":;<>|&]*)?",
+            "",
+            tok,
+            flags=re.IGNORECASE,
+        )
     return bool(
         re.search(
             r"(?:^|[^a-zA-Z0-9_-])(/home/agent/\.(gemini|continue|config|local|cache|bashrc|profile|zshrc|ssh)|"
             r"~/\.(gemini|continue|config|local|cache|bashrc|profile|zshrc|ssh)|"
             r"\.gemini/config|\.continue/|\.local/share/code-server)(?:$|[^a-zA-Z0-9_-])",
-            tok,
+            tok_to_check,
             re.IGNORECASE,
         )
     )

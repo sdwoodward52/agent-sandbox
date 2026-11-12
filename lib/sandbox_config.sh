@@ -229,7 +229,7 @@ ensure_git_exclude_entries() {
   mkdir -p "${host_repo}/.git/info"
   touch "${exclude_file}"
   local pattern
-  for pattern in "/.env" "/.env.local"; do
+  for pattern in "/.env" "/.env.local" "/.venv"; do
     if ! grep -qxF "${pattern}" "${exclude_file}" 2>/dev/null; then
       echo "${pattern}" >> "${exclude_file}"
     fi
@@ -265,6 +265,7 @@ EOF
     [[ -n "${host_repo}" && -d "${host_repo}" ]] || continue
 
     local masks_dir="${OVERLAYS_DIR}/${rname}/masks"
+    local venv_dir="${OVERLAYS_DIR}/${rname}/venv"
     local ws_dir="${WORKSPACES_DIR}/${rname}"
     mkdir -p "${masks_dir}" "${ws_dir}"
 
@@ -273,6 +274,15 @@ EOF
     cat >> "${OVERLAYS_COMPOSE_FILE}" <<EOF
       - "${host_repo}:/workspaces/${rname}:rw"
 EOF
+
+    # Shadow host .venv with a writable Linux-native overlay so host (macOS) and
+    # container (Linux) virtual environments do not overwrite or break each other.
+    if [[ -d "${host_repo}/.venv" ]] || { [[ -d "${venv_dir}" ]] && [[ -n "$(ls -A "${venv_dir}" 2>/dev/null)" ]]; }; then
+      mkdir -p "${venv_dir}"
+      cat >> "${OVERLAYS_COMPOSE_FILE}" <<EOF
+      - "${venv_dir}:/workspaces/${rname}/.venv:rw"
+EOF
+    fi
 
     if [[ -d "${host_repo}/.git" ]]; then
       cat >> "${OVERLAYS_COMPOSE_FILE}" <<EOF

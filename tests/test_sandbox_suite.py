@@ -261,6 +261,48 @@ class PreToolGuardTest(unittest.TestCase):
                 res = pre_tool_guard.evaluate_tool_call(_write_file_payload(path))
                 self.assertEqual(res["decision"], "deny")
 
+    def test_allows_antigravity_brain_artifacts_while_blocking_other_gemini_paths(
+        self,
+    ) -> None:
+        allowed_artifact_paths = [
+            "/home/agent/.gemini/antigravity/brain/conv-123/implementation_plan.md",
+            "/home/agent/.gemini/antigravity/brain/conv-123/task.md",
+            "/home/agent/.gemini/antigravity/brain/conv-123/scratch/check.py",
+        ]
+        for path in allowed_artifact_paths:
+            with self.subTest(allowed_path=path):
+                res = pre_tool_guard.evaluate_tool_call(_write_file_payload(path))
+                self.assertEqual(res["decision"], "allow", msg=res)
+
+        allowed_cmds = [
+            "python3 /home/agent/.gemini/antigravity/brain/conv-123/scratch/check.py",
+            "ls ~/.gemini/antigravity/brain/conv-123",
+        ]
+        for cmd in allowed_cmds:
+            with self.subTest(allowed_cmd=cmd):
+                res = pre_tool_guard.evaluate_tool_call(_run_cmd_payload(cmd))
+                self.assertEqual(res["decision"], "allow", msg=res)
+
+        denied_paths = [
+            "/home/agent/.gemini/config/hooks.json",
+            "/home/agent/.gemini/antigravity-cli/settings.json",
+            "/home/agent/.gemini/antigravity/brain/../../config/hooks.json",
+            "/workspaces/app/.gemini/settings.json",
+        ]
+        for path in denied_paths:
+            with self.subTest(denied_path=path):
+                res = pre_tool_guard.evaluate_tool_call(_write_file_payload(path))
+                self.assertEqual(res["decision"], "deny")
+
+        denied_cmds = [
+            "cat /home/agent/.gemini/config/hooks.json",
+            "ls /home/agent/.gemini/antigravity/brain/../../config",
+        ]
+        for cmd in denied_cmds:
+            with self.subTest(denied_cmd=cmd):
+                res = pre_tool_guard.evaluate_tool_call(_run_cmd_payload(cmd))
+                self.assertEqual(res["decision"], "deny")
+
     def test_blocks_symlink_traversal_in_file_writes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td).resolve()
@@ -566,6 +608,8 @@ class GitAgyWorkflowTest(unittest.TestCase):
         (self.trusted_repo / "Jenkinsfile").write_text("pipeline {}\n")
         (self.trusted_repo / ".env").write_text("HOST_SECRET=1\n")
         (self.trusted_repo / ".env.production").write_text("PROD_SECRET=1\n")
+        (self.trusted_repo / ".venv" / "bin").mkdir(parents=True)
+        (self.trusted_repo / ".venv" / "bin" / "pytest").write_text("#!/Users/host/python\n")
 
         init_res = subprocess.run(
             [str(AGY_WORKFLOW_PATH), "init"],
@@ -582,10 +626,15 @@ class GitAgyWorkflowTest(unittest.TestCase):
         ).read_text()
         empty_hooks = self.sandbox_home / "state" / "empty-hooks"
         masks_dir = self.sandbox_home / "overlays" / "trusted-app" / "masks"
+        venv_dir = self.sandbox_home / "overlays" / "trusted-app" / "venv"
 
         self.assertIn(
             f"{self.trusted_repo}:/workspaces/trusted-app:rw", overlay_compose
         )
+        self.assertIn(
+            f"{venv_dir}:/workspaces/trusted-app/.venv:rw", overlay_compose
+        )
+        self.assertTrue(venv_dir.is_dir())
         self.assertIn(
             f"{self.trusted_repo}/.git:/workspaces/trusted-app/.git:ro",
             overlay_compose,
@@ -629,6 +678,7 @@ class GitAgyWorkflowTest(unittest.TestCase):
         exclude_text = (self.trusted_repo / ".git" / "info" / "exclude").read_text()
         self.assertIn("/.env", exclude_text)
         self.assertIn("/.env.local", exclude_text)
+        self.assertIn("/.venv", exclude_text)
 
     def test_fresh_repo_does_not_mount_nonexistent_secrets_or_metadata_dirs(
         self,
@@ -658,6 +708,7 @@ class GitAgyWorkflowTest(unittest.TestCase):
         self.assertNotIn("/workspaces/trusted-app/.env.local:ro", overlay_compose)
         self.assertNotIn("/workspaces/trusted-app/.vscode:ro", overlay_compose)
         self.assertNotIn("/workspaces/trusted-app/.github:ro", overlay_compose)
+        self.assertNotIn("/workspaces/trusted-app/.venv:rw", overlay_compose)
         self.assertNotIn("/workspaces/trusted-app/.husky:ro", overlay_compose)
         self.assertFalse((masks_dir / ".env").exists())
         self.assertFalse((masks_dir / ".env.local").exists())
