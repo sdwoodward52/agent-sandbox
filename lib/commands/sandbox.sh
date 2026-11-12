@@ -169,19 +169,10 @@ cmd_start() {
     esac
   done
 
-  if [[ "${force_rebuild}" == "true" ]]; then
-    if [[ -n "${target_dir}" ]]; then
-      cmd_up --rebuild "${target_dir}"
-    else
-      cmd_up --rebuild
-    fi
-  else
-    if [[ -n "${target_dir}" ]]; then
-      cmd_up "${target_dir}"
-    else
-      cmd_up
-    fi
-  fi
+  local -a up_args=()
+  [[ "${force_rebuild}" == "true" ]] && up_args+=("--rebuild")
+  [[ -n "${target_dir}" ]] && up_args+=("${target_dir}")
+  cmd_up ${up_args[@]+"${up_args[@]}"}
 
   local wf_bin="${AGY_WORKFLOW_BIN:-${SANDBOX_ROOT}/bin/agy-workflow}"
 

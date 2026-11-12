@@ -99,12 +99,36 @@ resolve_container_workdir() {
 }
 
 #######################################
-# Generate Continue autocomplete configuration, secrets, and fallback proxy.
+# Resolve GEMINI_API_KEY from environment, pod.env, or optional continue .env.
+# Globals:
+#   ENV_FILE
+#   GEMINI_API_KEY
+# Arguments:
+#   Optional path to continue .env file.
+# Outputs:
+#   Resolved API key (or empty string) to stdout.
+#######################################
+resolve_gemini_api_key() {
+  local continue_env="${1:-}"
+  if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+    printf '%s' "${GEMINI_API_KEY}"
+    return 0
+  fi
+  local key=""
+  if [[ -f "${ENV_FILE:-}" ]]; then
+    key="$(sed -n 's/^GEMINI_API_KEY="\(.*\)"$/\1/p' "${ENV_FILE}" | head -n 1 || true)"
+  fi
+  if [[ -z "${key}" && -n "${continue_env}" && -f "${continue_env}" ]]; then
+    key="$(sed -n 's/^GEMINI_API_KEY=\(.*\)$/\1/p' "${continue_env}" | head -n 1 || true)"
+  fi
+  printf '%s' "${key}"
+}
+
+#######################################
+# Generate Continue autocomplete configuration and secrets.
 # Globals:
 #   AGY_AUTOCOMPLETE_FALLBACK_MODELS
 #   AGY_AUTOCOMPLETE_MODEL
-#   ENV_FILE
-#   GEMINI_API_KEY
 #   SANDBOX_ROOT
 #   STATE_DIR
 #######################################
@@ -112,26 +136,16 @@ ensure_continue_config() {
   local continue_dir="${STATE_DIR}/continue"
   local continue_cfg="${continue_dir}/config.yaml"
   local continue_env="${continue_dir}/.env"
-  local fallback_script="${continue_dir}/agy-gemini-fallback.py"
   local autocomplete_model="${AGY_AUTOCOMPLETE_MODEL:-gemini-flash-lite-latest}"
   local fallback_chain="${AGY_AUTOCOMPLETE_FALLBACK_MODELS:-gemini-3.1-flash-lite,gemini-2.5-flash,${autocomplete_model},gemini-3.6-flash,gemini-3.5-flash,gemini-flash-latest}"
-  local resolved_key="${GEMINI_API_KEY:-}"
+  local resolved_key
+  resolved_key="$(resolve_gemini_api_key "${continue_env}")"
 
   mkdir -p "${continue_dir}"
-
-  if [[ -z "${resolved_key}" && -f "${ENV_FILE}" ]]; then
-    resolved_key="$(sed -n 's/^GEMINI_API_KEY="\(.*\)"$/\1/p' "${ENV_FILE}" | head -n 1 || true)"
-  fi
-  if [[ -z "${resolved_key}" && -f "${continue_env}" ]]; then
-    resolved_key="$(sed -n 's/^GEMINI_API_KEY=\(.*\)$/\1/p' "${continue_env}" | head -n 1 || true)"
-  fi
 
   cat > "${continue_env}" <<EOF
 GEMINI_API_KEY=${resolved_key}
 EOF
-
-  cp -p "${SANDBOX_ROOT}/resources/fallback.py" "${fallback_script}"
-  chmod 0755 "${fallback_script}"
 
   if [[ -n "${resolved_key}" ]]; then
     sed -e "s|__FALLBACK_CHAIN__|${fallback_chain}|g" \
@@ -139,11 +153,6 @@ EOF
         "${SANDBOX_ROOT}/resources/continue-config.yaml" > "${continue_cfg}"
   else
     cp -p "${SANDBOX_ROOT}/resources/continue-empty.yaml" "${continue_cfg}"
-  fi
-
-  if command -v docker &>/dev/null && docker inspect -f '{{.State.Running}}' agy-agent-sandbox 2>/dev/null | grep -q "true"; then
-    docker exec -d -e "AGY_AUTOCOMPLETE_FALLBACK_MODELS=${fallback_chain}" agy-agent-sandbox \
-      python3 /home/agent/.continue/agy-gemini-fallback.py 2>/dev/null || true
   fi
 }
 
@@ -158,8 +167,8 @@ ensure_sandbox_gemini_settings() {
   local app_config="${STATE_DIR}/gemini/config/config.json"
   mkdir -p "${STATE_DIR}/gemini/antigravity-cli" "${STATE_DIR}/gemini/config"
 
-  if command -v python3 &>/dev/null; then
-    python3 -c '
+  command -v python3 &>/dev/null || err "python3 is required on the host."
+  python3 -c '
 import json, os, sys
 for path in sys.argv[1:]:
     data = {}
@@ -170,35 +179,17 @@ for path in sys.argv[1:]:
         except Exception:
             data = {}
     data["permissionPreset"] = "Turbo"
+    data["enableTerminalSandbox"] = False
     if "antigravity-cli" in path:
         data.setdefault("agentMode", "auto")
     if "config.json" in path:
         user_settings = data.setdefault("userSettings", {})
         if isinstance(user_settings, dict):
             user_settings["permissionPreset"] = "AGENT_PERMISSION_PRESET_TURBO"
+            user_settings["enableTerminalSandbox"] = False
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 ' "${cli_settings}" "${app_config}" 2>/dev/null || true
-  else
-    if [[ ! -f "${cli_settings}" ]]; then
-      cat > "${cli_settings}" <<EOF
-{
-  "permissionPreset": "Turbo",
-  "agentMode": "auto"
-}
-EOF
-    fi
-    if [[ ! -f "${app_config}" ]]; then
-      cat > "${app_config}" <<EOF
-{
-  "permissionPreset": "Turbo",
-  "userSettings": {
-    "permissionPreset": "AGENT_PERMISSION_PRESET_TURBO"
-  }
-}
-EOF
-    fi
-  fi
 }
 
 #######################################
@@ -237,6 +228,24 @@ ensure_git_exclude_entries() {
 }
 
 #######################################
+# Create an empty 0444 mask file and append a :ro mount to OVERLAYS_COMPOSE_FILE.
+# Globals:
+#   OVERLAYS_COMPOSE_FILE
+# Arguments:
+#   Masks directory, repository name, and relative filename.
+#######################################
+emit_ro_mask_mount() {
+  local masks_dir="$1"
+  local rname="$2"
+  local env_base="$3"
+  touch "${masks_dir}/${env_base}"
+  chmod 0444 "${masks_dir}/${env_base}" 2>/dev/null || true
+  cat >> "${OVERLAYS_COMPOSE_FILE}" <<EOF
+      - "${masks_dir}/${env_base}:/workspaces/${rname}/${env_base}:ro"
+EOF
+}
+
+#######################################
 # Generate docker-compose.overlays.yml with :rw source mounts & :ro metadata shadows.
 # Globals:
 #   EMPTY_HOOKS_DIR
@@ -245,7 +254,6 @@ ensure_git_exclude_entries() {
 #   PROTECTED_REPO_DIRS
 #   PROTECTED_REPO_FILES
 #   REGISTRY_DIR
-#   WORKSPACES_DIR
 #######################################
 generate_overlay_compose_override() {
   cat > "${OVERLAYS_COMPOSE_FILE}" <<EOF
@@ -266,8 +274,7 @@ EOF
 
     local masks_dir="${OVERLAYS_DIR}/${rname}/masks"
     local venv_dir="${OVERLAYS_DIR}/${rname}/venv"
-    local ws_dir="${WORKSPACES_DIR}/${rname}"
-    mkdir -p "${masks_dir}" "${ws_dir}"
+    mkdir -p "${masks_dir}"
 
     ensure_git_exclude_entries "${host_repo}"
 
@@ -300,29 +307,20 @@ EOF
     local env_base
     for env_base in ".env" ".env.local"; do
       if [[ -f "${host_repo}/${env_base}" ]]; then
-        touch "${masks_dir}/${env_base}"
-        chmod 0444 "${masks_dir}/${env_base}" 2>/dev/null || true
-        cat >> "${OVERLAYS_COMPOSE_FILE}" <<EOF
-      - "${masks_dir}/${env_base}:/workspaces/${rname}/${env_base}:ro"
-EOF
+        emit_ro_mask_mount "${masks_dir}" "${rname}" "${env_base}"
       fi
     done
 
     local env_path
     for env_path in "${host_repo}"/.env.*; do
       [[ -f "${env_path}" ]] || continue
-      local env_base
       env_base="$(basename "${env_path}")"
       case "${env_base}" in
         .env.local|.env.example|.env.sample|.env.template|.env.dist)
           continue
           ;;
       esac
-      touch "${masks_dir}/${env_base}"
-      chmod 0444 "${masks_dir}/${env_base}" 2>/dev/null || true
-      cat >> "${OVERLAYS_COMPOSE_FILE}" <<EOF
-      - "${masks_dir}/${env_base}:/workspaces/${rname}/${env_base}:ro"
-EOF
+      emit_ro_mask_mount "${masks_dir}" "${rname}" "${env_base}"
     done
 
     local d
@@ -359,12 +357,10 @@ EOF
 #   SANDBOX_ROOT
 #   SKILLS_DEFAULT
 #   STATE_DIR
-#   WORKSPACES_DIR
 #######################################
 ensure_sandbox_layout() {
   mkdir -p "${SANDBOX_HOME}"
   CANONICAL_SHOME="$(cd "${SANDBOX_HOME}" && pwd -P)"
-  WORKSPACES_DIR="${CANONICAL_SHOME}/workspaces"
   OVERLAYS_DIR="${CANONICAL_SHOME}/overlays"
   REGISTRY_DIR="${CANONICAL_SHOME}/registry"
   STATE_DIR="${CANONICAL_SHOME}/state"
@@ -373,7 +369,6 @@ ensure_sandbox_layout() {
   OVERLAYS_COMPOSE_FILE="${STATE_DIR}/docker-compose.overlays.yml"
 
   mkdir -p \
-    "${WORKSPACES_DIR}" \
     "${OVERLAYS_DIR}" \
     "${REGISTRY_DIR}" \
     "${EMPTY_HOOKS_DIR}" \
@@ -393,13 +388,8 @@ ensure_sandbox_layout() {
     mkdir -p "${SKILLS_DEFAULT}"
   fi
 
-  local resolved_gemini_key="${GEMINI_API_KEY:-}"
-  if [[ -z "${resolved_gemini_key}" && -f "${ENV_FILE}" ]]; then
-    resolved_key="$(sed -n 's/^GEMINI_API_KEY="\(.*\)"$/\1/p' "${ENV_FILE}" | head -n 1 || true)"
-    if [[ -n "${resolved_key}" ]]; then
-      resolved_gemini_key="${resolved_key}"
-    fi
-  fi
+  local resolved_gemini_key
+  resolved_gemini_key="$(resolve_gemini_api_key)"
 
   cat > "${ENV_FILE}" <<EOF
 SANDBOX_STATE_DIR="${STATE_DIR}"

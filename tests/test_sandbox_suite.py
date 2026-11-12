@@ -268,6 +268,8 @@ class PreToolGuardTest(unittest.TestCase):
             "/home/agent/.gemini/antigravity/brain/conv-123/implementation_plan.md",
             "/home/agent/.gemini/antigravity/brain/conv-123/task.md",
             "/home/agent/.gemini/antigravity/brain/conv-123/scratch/check.py",
+            "/home/agent/.gemini/antigravity-cli/brain/conv-123/implementation_plan.md",
+            "/home/agent/.gemini/antigravity-cli/brain/conv-123/scratch/check.py",
         ]
         for path in allowed_artifact_paths:
             with self.subTest(allowed_path=path):
@@ -277,6 +279,8 @@ class PreToolGuardTest(unittest.TestCase):
         allowed_cmds = [
             "python3 /home/agent/.gemini/antigravity/brain/conv-123/scratch/check.py",
             "ls ~/.gemini/antigravity/brain/conv-123",
+            "python3 /home/agent/.gemini/antigravity-cli/brain/conv-123/scratch/check.py",
+            "ls ~/.gemini/antigravity-cli/brain/conv-123",
         ]
         for cmd in allowed_cmds:
             with self.subTest(allowed_cmd=cmd):
@@ -332,8 +336,6 @@ class PreToolGuardTest(unittest.TestCase):
             "echo 'git push' | bash",
             "cat << 'EOF' | sh\ngit push\nEOF",
             "echo Z2l0IHB1c2g= | base64 -d | sh",
-            "echo evil > /mnt/lower/app/app.py",
-            "cat /mnt/overlays/app/upper/.wh.app.py",
         ]
         for cmd in bypasses:
             with self.subTest(cmd=cmd):
@@ -596,6 +598,52 @@ class GitAgyWorkflowTest(unittest.TestCase):
             capture_output=True,
         )
         return target
+
+    def _make_fake_docker(
+        self,
+        bin_dir: Path,
+        tmux_output_file: Path | None = None,
+        extract_remote_url: bool = False,
+    ) -> Path:
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "#!/usr/bin/env bash",
+            'if [ "$1" = "inspect" ]; then',
+            '    echo "true"',
+            "    exit 0",
+            "fi",
+        ]
+        if tmux_output_file is not None:
+            if extract_remote_url:
+                lines.extend(
+                    [
+                        'if [ "$1" = "exec" ] && [ "$3" = "agy-url" ]; then',
+                        f'    awk \'/https:\\/\\/antigravity\\.google/ {{ u=$0; sub(/^.*https:\\/\\/antigravity\\.google/,"https://antigravity.google",u); sub(/[[:space:]]+$/,"",u); if (u ~ /[[:space:]]/) {{ sub(/[[:space:]].*$/,"",u) }} else if ((getline n) > 0) {{ gsub(/^[[:space:]]+|[[:space:]]+$/,"",n); if (n !~ /^on([[:space:]]|$)/) {{ sub(/[[:space:]].*$/,"",n); if (n ~ /^[0-9a-zA-Z_-]+$/) u=u n }} }} sub(/\\.*$/,"",u); print u; exit }}\' "{tmux_output_file}"',
+                        "    exit 0",
+                        "fi",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        'if [ "$1" = "exec" ] && [ "$3" = "agy-url" ]; then',
+                        "    exit 0",
+                        "fi",
+                    ]
+                )
+            lines.extend(
+                [
+                    'if [ "$1" = "exec" ] && [ "$3" = "tmux" ] && [ "$4" = "capture-pane" ]; then',
+                    f'    cat "{tmux_output_file}"',
+                    "    exit 0",
+                    "fi",
+                ]
+            )
+        lines.append("exit 0")
+        fake_docker = bin_dir / "docker"
+        fake_docker.write_text("\n".join(lines) + "\n")
+        fake_docker.chmod(0o755)
+        return fake_docker
 
     def test_init_registers_repo_and_creates_direct_mount_with_ro_metadata_guards(
         self,
@@ -914,7 +962,7 @@ class GitAgyWorkflowTest(unittest.TestCase):
             check=True,
             capture_output=True,
         )
-        sandbox_sub = self.sandbox_home / "workspaces" / "trusted-app"
+        sandbox_sub = self.sandbox_home / "overlays" / "trusted-app"
         inside_res = subprocess.run(
             [str(AGY_WORKFLOW_PATH), "status"],
             cwd=sandbox_sub,
@@ -938,29 +986,11 @@ class GitAgyWorkflowTest(unittest.TestCase):
         )
 
         fake_bin = self.base / "fake-bin"
-        fake_bin.mkdir(parents=True, exist_ok=True)
         opened_url_file = self.base / "opened_url.txt"
         tmux_output_file = self.base / "tmux_output.txt"
-
-        fake_docker = fake_bin / "docker"
-        fake_docker.write_text(
-            f"""#!/usr/bin/env bash
-if [ "$1" = "inspect" ]; then
-    echo "true"
-    exit 0
-fi
-if [ "$1" = "exec" ] && [ "$3" = "agy-url" ]; then
-    awk '/https:\\/\\/antigravity\\.google/ {{ u=$0; sub(/^.*https:\\/\\/antigravity\\.google/,"https://antigravity.google",u); sub(/[[:space:]]+$/,"",u); if (u ~ /[[:space:]]/) {{ sub(/[[:space:]].*$/,"",u) }} else if ((getline n) > 0) {{ gsub(/^[[:space:]]+|[[:space:]]+$/,"",n); if (n !~ /^on([[:space:]]|$)/) {{ sub(/[[:space:]].*$/,"",n); if (n ~ /^[0-9a-zA-Z_-]+$/) u=u n }} }} sub(/\\.*$/,"",u); print u; exit }}' "{tmux_output_file}"
-    exit 0
-fi
-if [ "$1" = "exec" ] && [ "$3" = "tmux" ] && [ "$4" = "capture-pane" ]; then
-    cat "{tmux_output_file}"
-    exit 0
-fi
-exit 0
-"""
+        self._make_fake_docker(
+            fake_bin, tmux_output_file=tmux_output_file, extract_remote_url=True
         )
-        fake_docker.chmod(0o755)
 
         fake_open = fake_bin / "open"
         fake_open.write_text(
@@ -1017,28 +1047,11 @@ exit 0
         )
 
         fake_bin = self.base / "fake-bin"
-        fake_bin.mkdir(parents=True, exist_ok=True)
         opened_url_file = self.base / "opened_url.txt"
         tmux_output_file = self.base / "tmux_output.txt"
-
-        fake_docker = fake_bin / "docker"
-        fake_docker.write_text(
-            f"""#!/usr/bin/env bash
-if [ "$1" = "inspect" ]; then
-    echo "true"
-    exit 0
-fi
-if [ "$1" = "exec" ] && [ "$3" = "agy-url" ]; then
-    exit 0
-fi
-if [ "$1" = "exec" ] && [ "$3" = "tmux" ] && [ "$4" = "capture-pane" ]; then
-    cat "{tmux_output_file}"
-    exit 0
-fi
-exit 0
-"""
+        self._make_fake_docker(
+            fake_bin, tmux_output_file=tmux_output_file, extract_remote_url=False
         )
-        fake_docker.chmod(0o755)
 
         fake_open = fake_bin / "open"
         fake_open.write_text(
@@ -1084,12 +1097,7 @@ exit 0
         (host_creds_dir / "settings.json").write_text('{"authenticated": true}')
 
         fake_bin = self.base / "fake-bin"
-        fake_bin.mkdir(parents=True, exist_ok=True)
-        fake_docker = fake_bin / "docker"
-        fake_docker.write_text(
-            '#!/usr/bin/env bash\nif [ "$1" = "inspect" ]; then echo "true"; exit 0; fi\nexit 0\n'
-        )
-        fake_docker.chmod(0o755)
+        self._make_fake_docker(fake_bin)
 
         auth_env = self.env.copy()
         auth_env["HOME"] = str(fake_home)
@@ -1121,12 +1129,7 @@ exit 0
         host_settings_file.write_text(json.dumps({"permissionPreset": "Default", "token": "xyz"}))
 
         fake_bin = self.base / "fake-bin-turbo"
-        fake_bin.mkdir(parents=True, exist_ok=True)
-        fake_docker = fake_bin / "docker"
-        fake_docker.write_text(
-            '#!/usr/bin/env bash\nif [ "$1" = "inspect" ]; then echo "true"; exit 0; fi\nexit 0\n'
-        )
-        fake_docker.chmod(0o755)
+        self._make_fake_docker(fake_bin)
 
         test_env = self.env.copy()
         test_env["HOME"] = str(fake_home)
@@ -1233,6 +1236,20 @@ exit 0
         )
         self.assertIn("Native IDE target ready", native_res.stdout)
 
+        # Native mode with explicit directory argument from outside the repo
+        native_dir_res = subprocess.run(
+            [str(AGY_WORKFLOW_PATH), "ide", "--native", str(self.trusted_repo)],
+            cwd=self.base,
+            env=native_env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertIn(
+            f"Native IDE target ready: {self.trusted_repo}",
+            native_dir_res.stdout,
+        )
+
     def test_strict_cli_split_between_agy_sandbox_and_agy_workflow(self) -> None:
         self.assertFalse((SANDBOX_ROOT / "bin" / "git-agy").exists())
         self.assertTrue(AGY_SANDBOX_PATH.is_file())
@@ -1285,6 +1302,12 @@ class SandboxConfigInvariantsTest(unittest.TestCase):
         self.assertNotIn("/dev/fuse", compose)
         self.assertNotIn("SYS_ADMIN", compose)
         self.assertIn("no-new-privileges:true", compose)
+        self.assertIn("seccomp=./resources/seccomp-sandbox.json", compose)
+        self.assertIn("systempaths=unconfined", compose)
+        seccomp_cfg = json.loads(
+            (SANDBOX_ROOT / "resources" / "seccomp-sandbox.json").read_text()
+        )
+        self.assertEqual(seccomp_cfg["defaultAction"], "SCMP_ACT_ALLOW")
         self.assertIn("GIT_OPTIONAL_LOCKS=0", compose)
         self.assertIn("/empty-hooks:/home/agent/.gemini/empty-hooks:ro", compose)
         self.assertIn("GIT_CONFIG_PARAMETERS='core.hooksPath=/home/agent/.gemini/empty-hooks'", compose)

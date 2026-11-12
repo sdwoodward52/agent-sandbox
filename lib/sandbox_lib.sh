@@ -144,3 +144,23 @@ open_chrome_app_window() {
     --hide-crash-restore-bubble \
     --app="${url}" 2>/dev/null || open "${url}"
 }
+
+#######################################
+# Open a URL in a chromeless Chrome app window or the default host browser.
+# Globals:
+#   AGY_NO_BROWSER
+# Arguments:
+#   Target URL, app mode ("true" or "false"), and Chrome profile directory.
+#######################################
+open_ui_url() {
+  local url="$1"
+  local app_mode="$2"
+  local app_profile_dir="$3"
+  if command -v open &>/dev/null && [[ "${AGY_NO_BROWSER:-false}" != "true" ]]; then
+    if [[ "${app_mode}" == "true" ]]; then
+      open_chrome_app_window "${url}" "${app_profile_dir}"
+    else
+      open "${url}"
+    fi
+  fi
+}

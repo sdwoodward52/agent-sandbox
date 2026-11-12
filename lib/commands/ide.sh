@@ -59,9 +59,16 @@ cmd_ide() {
 
   if [[ "${ide_mode}" == "native" ]]; then
     local host_ws_target="${TRUSTED_REPO:-}"
-    if [[ -z "${host_ws_target}" ]] && git rev-parse --show-toplevel &>/dev/null; then
+    if [[ -n "${target_arg}" ]]; then
+      if [[ -d "${target_arg}" ]]; then
+        host_ws_target="$(cd "${target_arg}" && pwd -P)"
+      elif [[ -f "${REGISTRY_DIR}/$(basename "${target_arg}").json" ]]; then
+        host_ws_target="$(sed -n 's/.*"host_repo":[[:space:]]*"\([^"]*\)".*/\1/p' "${REGISTRY_DIR}/$(basename "${target_arg}").json")"
+      fi
+    elif [[ -z "${host_ws_target}" ]] && git rev-parse --show-toplevel &>/dev/null; then
       host_ws_target="$(git rev-parse --show-toplevel)"
     fi
+    [[ -n "${host_ws_target}" ]] || err "Could not determine host repository path for --native IDE. Pass a directory or run inside a Git repository."
     info "Opening native macOS IDE for ${host_ws_target}..."
     if [[ "${AGY_NO_BROWSER:-false}" == "true" ]]; then
       ok "Native IDE target ready: ${host_ws_target}"

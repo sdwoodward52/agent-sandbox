@@ -224,6 +224,36 @@ STANDALONE_DOT_GIT_PATTERN: re.Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+SEGMENT_SPLIT_RE: re.Pattern[str] = re.compile(r"(?:&&|\|\||[;\n|&])+")
+SUBSHELL_RE: re.Pattern[str] = re.compile(r"[\$<>]\(([^()]+)\)")
+
+
+def _build_dirs_files_token_regex(
+    dirs: frozenset[str], files: frozenset[str]
+) -> re.Pattern[str]:
+    dir_alts = "|".join(re.escape(d) for d in sorted(dirs))
+    file_alts = "|".join(re.escape(f) for f in sorted(files))
+    return re.compile(
+        rf"(?:^|[^a-zA-Z0-9_-])(?:(?:{dir_alts})(?:/|$)|(?:{file_alts})(?:$|[^a-zA-Z0-9_-]))",
+        re.IGNORECASE,
+    )
+
+
+CUSTOMIZATION_TOKEN_RE: re.Pattern[str] = _build_dirs_files_token_regex(
+    FORBIDDEN_CUSTOMIZATION_DIRS, FORBIDDEN_CUSTOMIZATION_FILES
+)
+CICD_OR_META_TOKEN_RE: re.Pattern[str] = _build_dirs_files_token_regex(
+    FORBIDDEN_CICD_AND_META_DIRS, FORBIDDEN_CICD_AND_META_FILES
+)
+_IDE_EXEC_ALTS = "|".join(
+    rf"{re.escape(d)}/(?:{'|'.join(re.escape(f) for f in sorted(files))})"
+    for d, files in sorted(FORBIDDEN_IDE_EXEC_FILES.items())
+)
+IDE_EXEC_TOKEN_RE: re.Pattern[str] = re.compile(
+    rf"(?:^|[^a-zA-Z0-9_-])(?:{_IDE_EXEC_ALTS})(?:$|[^a-zA-Z0-9_-])",
+    re.IGNORECASE,
+)
+
 
 def _extract_workspaces_repo(path_str: str) -> tuple[str, str, list[str]] | None:
     norm = posixpath.normpath(path_str.replace("\\", "/"))
@@ -260,18 +290,25 @@ def _is_git_config_file_path(parts_lower: set[str]) -> bool:
     )
 
 
-ANTIGRAVITY_BRAIN_ROOT = "/home/agent/.gemini/antigravity/brain"
+ANTIGRAVITY_BRAIN_ROOTS = (
+    "/home/agent/.gemini/antigravity/brain",
+    "/home/agent/.gemini/antigravity-cli/brain",
+)
+
+
+def _matching_brain_root(abs_path: str, real_path: str) -> str | None:
+    """Return the matching artifacts brain root if both abs_path and real_path resolve inside it."""
+    abs_norm = abs_path.replace("\\", "/").rstrip("/")
+    real_norm = real_path.replace("\\", "/").rstrip("/")
+    for root in ANTIGRAVITY_BRAIN_ROOTS:
+        brain_real = os.path.realpath(root).replace("\\", "/").rstrip("/")
+        if abs_norm.startswith(root + "/") and real_norm.startswith(brain_real + "/"):
+            return root
+    return None
 
 
 def _is_antigravity_brain_path(abs_path: str, real_path: str) -> bool:
-    """Return True if both abs_path and real_path resolve inside the artifacts brain directory."""
-    abs_norm = abs_path.replace("\\", "/").rstrip("/")
-    real_norm = real_path.replace("\\", "/").rstrip("/")
-    brain_real = os.path.realpath(ANTIGRAVITY_BRAIN_ROOT).replace("\\", "/").rstrip("/")
-    return (
-        abs_norm.startswith(ANTIGRAVITY_BRAIN_ROOT + "/")
-        and real_norm.startswith(brain_real + "/")
-    )
+    return _matching_brain_root(abs_path, real_path) is not None
 
 
 def _is_sandbox_configuration_path(
@@ -293,23 +330,17 @@ def _is_code_server_state_path(parts_lower: set[str]) -> bool:
     ) or ".continue" in parts_lower
 
 
-def _is_customization_directory_or_file(
-    parts_lower: set[str], norm_parts: list[str], real_parts: list[str]
+def _matches_dir_or_leaf(
+    parts_lower: set[str],
+    norm_parts: list[str],
+    real_parts: list[str],
+    dirs: frozenset[str],
+    files: frozenset[str],
 ) -> bool:
-    return bool(parts_lower & FORBIDDEN_CUSTOMIZATION_DIRS) or (
-        bool(norm_parts) and norm_parts[-1].lower() in FORBIDDEN_CUSTOMIZATION_FILES
-    ) or (
-        bool(real_parts) and real_parts[-1].lower() in FORBIDDEN_CUSTOMIZATION_FILES
-    )
-
-
-def _is_cicd_or_repo_meta_path(
-    parts_lower: set[str], norm_parts: list[str], real_parts: list[str]
-) -> bool:
-    return bool(parts_lower & FORBIDDEN_CICD_AND_META_DIRS) or (
-        bool(norm_parts) and norm_parts[-1].lower() in FORBIDDEN_CICD_AND_META_FILES
-    ) or (
-        bool(real_parts) and real_parts[-1].lower() in FORBIDDEN_CICD_AND_META_FILES
+    return (
+        bool(parts_lower & dirs)
+        or (bool(norm_parts) and norm_parts[-1].lower() in files)
+        or (bool(real_parts) and real_parts[-1].lower() in files)
     )
 
 
@@ -382,6 +413,17 @@ def _check_cross_repo_boundaries(
     return None
 
 
+def _find_symlink_in_subpath(base: str, parts: list[str]) -> str | None:
+    probe = base
+    for part in parts:
+        if not part:
+            continue
+        probe = os.path.join(probe, part)
+        if os.path.islink(probe):
+            return probe
+    return None
+
+
 def _check_file_path(
     path_value: str,
     allowed_workspaces: list[str] | None = None,
@@ -401,9 +443,6 @@ def _check_file_path(
 
     all_parts_lower = {p.lower() for p in (*raw_parts, *norm_parts, *real_parts)}
 
-    if "mnt" in all_parts_lower and ("lower" in all_parts_lower or "overlays" in all_parts_lower):
-        return f"Direct access to internal overlay mount directories ('{path_value}') is forbidden."
-
     if _is_git_metadata_path(all_parts_lower):
         return f"File access to '{path_value}' (.git metadata/hooks) is forbidden."
 
@@ -417,10 +456,22 @@ def _check_file_path(
     if _is_code_server_state_path(all_parts_lower):
         return "Modifying persisted code-server IDE state or extensions is forbidden."
 
-    if _is_customization_directory_or_file(all_parts_lower, norm_parts, real_parts):
+    if _matches_dir_or_leaf(
+        all_parts_lower,
+        norm_parts,
+        real_parts,
+        FORBIDDEN_CUSTOMIZATION_DIRS,
+        FORBIDDEN_CUSTOMIZATION_FILES,
+    ):
         return f"Modifying agent customization or hook configuration '{path_value}' is forbidden."
 
-    if _is_cicd_or_repo_meta_path(all_parts_lower, norm_parts, real_parts):
+    if _matches_dir_or_leaf(
+        all_parts_lower,
+        norm_parts,
+        real_parts,
+        FORBIDDEN_CICD_AND_META_DIRS,
+        FORBIDDEN_CICD_AND_META_FILES,
+    ):
         return f"Modifying protected CI/CD or repository metadata path '{path_value}' is forbidden."
 
     for parts_seq in (raw_parts, norm_parts, real_parts):
@@ -431,13 +482,12 @@ def _check_file_path(
     if ".." in raw_parts or ".." in norm_parts:
         return f"Path traversal ('..') in file path '{path_value}' is forbidden."
 
-    if _is_antigravity_brain_path(abs_path_norm, real_path):
-        rel = abs_path_norm[len(ANTIGRAVITY_BRAIN_ROOT) :].lstrip("/")
-        probe = ANTIGRAVITY_BRAIN_ROOT
-        for part in rel.split("/"):
-            probe = os.path.join(probe, part)
-            if os.path.islink(probe):
-                return f"Writing through symlink '{probe}' is forbidden."
+    brain_root = _matching_brain_root(abs_path_norm, real_path)
+    if brain_root is not None:
+        rel = abs_path_norm[len(brain_root) :].lstrip("/")
+        symlink_hit = _find_symlink_in_subpath(brain_root, rel.split("/"))
+        if symlink_hit:
+            return f"Writing through symlink '{symlink_hit}' is forbidden."
         return None
 
     ws_info_norm = _extract_workspaces_repo(abs_path)
@@ -454,11 +504,9 @@ def _check_file_path(
     if not real_path.startswith(expected_repo_real.rstrip("/") + "/"):
         return f"Symlink traversal outside repository root ('{path_value}' -> '{real_path}') is forbidden."
 
-    probe = os.path.join(ws_root_norm, repo_norm)
-    for part in subparts_norm:
-        probe = os.path.join(probe, part)
-        if os.path.islink(probe):
-            return f"Writing through symlink '{probe}' is forbidden."
+    symlink_hit = _find_symlink_in_subpath(os.path.join(ws_root_norm, repo_norm), subparts_norm)
+    if symlink_hit:
+        return f"Writing through symlink '{symlink_hit}' is forbidden."
 
     return _check_cross_repo_boundaries(
         abs_path, real_path, ws_root_real, repo_real, path_value, allowed_workspaces
@@ -525,18 +573,12 @@ def _inspect_git_tokens(tokens: list[str]) -> str | None:
         if _has_forbidden_git_option(tok_lower):
             return f"Using dangerous Git option '{tok}' is forbidden inside the sandbox."
 
-        if tok == "-c" and idx + 1 < len(tokens):
-            cfg_expr = tokens[idx + 1]
+        if (tok == "-c" and idx + 1 < len(tokens)) or (tok.startswith("-c") and len(tok) > 2):
+            cfg_expr = tokens[idx + 1] if tok == "-c" else tok[2:]
             cfg_key = cfg_expr.split("=", 1)[0].strip()
             if DANGEROUS_GIT_CONFIG_PATTERN.search(cfg_key):
                 return f"Overriding execution-sensitive Git config '{cfg_key}' via -c is forbidden."
-            idx += 2
-            continue
-        if tok.startswith("-c") and len(tok) > 2:
-            cfg_key = tok[2:].split("=", 1)[0].strip()
-            if DANGEROUS_GIT_CONFIG_PATTERN.search(cfg_key):
-                return f"Overriding execution-sensitive Git config '{cfg_key}' via -c is forbidden."
-            idx += 1
+            idx += 2 if tok == "-c" else 1
             continue
 
         if tok in GIT_OPTS_WITH_VALUE:
@@ -605,21 +647,19 @@ def _split_shell_segments(cmd: str) -> list[str]:
 
     probe = normalized_cmd
     for _ in range(6):
-        matches = list(re.finditer(r"[\$<>]\(([^()]+)\)", probe))
+        matches = list(SUBSHELL_RE.finditer(probe))
         if not matches:
             break
         for match in matches:
-            inner = match.group(1)
-            if inner:
-                segments.extend(re.split(r"(?:&&|\|\||[;\n|&])+", inner))
-        probe = re.sub(r"[\$<>]\(([^()]+)\)", " ", probe)
+            if match.group(1):
+                segments.extend(SEGMENT_SPLIT_RE.split(match.group(1)))
+        probe = SUBSHELL_RE.sub(" ", probe)
 
     for match in re.finditer(r"`([^`]+)`", normalized_cmd):
-        inner = match.group(1)
-        if inner:
-            segments.extend(re.split(r"(?:&&|\|\||[;\n|&])+", inner))
+        if match.group(1):
+            segments.extend(SEGMENT_SPLIT_RE.split(match.group(1)))
 
-    segments.extend(re.split(r"(?:&&|\|\||[;\n|&])+", normalized_cmd))
+    segments.extend(SEGMENT_SPLIT_RE.split(normalized_cmd))
     return [s.strip() for s in segments if s.strip()]
 
 
@@ -662,7 +702,7 @@ def _matches_protected_sandbox_state_token(tok: str) -> bool:
         # Allow referencing the antigravity artifacts/scratch directory in shell commands
         # while still blocking any other ~/.gemini or /home/agent/.gemini reference.
         tok_to_check = re.sub(
-            r"(?:/home/agent/|~/)\.gemini/antigravity/brain(?:/[^\s'\":;<>|&]*)?",
+            r"(?:/home/agent/|~/)\.gemini/antigravity(?:-cli)?/brain(?:/[^\s'\":;<>|&]*)?",
             "",
             tok,
             flags=re.IGNORECASE,
@@ -673,41 +713,6 @@ def _matches_protected_sandbox_state_token(tok: str) -> bool:
             r"~/\.(gemini|continue|config|local|cache|bashrc|profile|zshrc|ssh)|"
             r"\.gemini/config|\.continue/|\.local/share/code-server)(?:$|[^a-zA-Z0-9_-])",
             tok_to_check,
-            re.IGNORECASE,
-        )
-    )
-
-
-def _matches_customization_token(tok: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:^|[^a-zA-Z0-9_-])([._]agents?(?:/|$)|hooks\.json|mcp_config\.json|config\.worktree|\.continuerules)",
-            tok,
-            re.IGNORECASE,
-        )
-    )
-
-
-def _matches_cicd_or_repo_meta_token(tok: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:^|[^a-zA-Z0-9_-])(?:"
-            r"(?:\.github|\.circleci|\.buildkite|\.husky)(?:/|$)|"
-            r"(?:\.gitlab-ci\.ya?ml|Jenkinsfile|azure-pipelines\.yml|\.travis\.yml|cloudbuild\.yaml|"
-            r"bitbucket-pipelines\.yml|\.gitattributes|\.gitmodules|\.pre-commit-config\.yaml|"
-            r"\.envrc|\.mise\.toml)(?:$|[^a-zA-Z0-9_-])"
-            r")",
-            tok,
-            re.IGNORECASE,
-        )
-    )
-
-
-def _matches_ide_config_token(tok: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:^|[^a-zA-Z0-9_-])(\.vscode/(?:tasks|launch|settings|extensions)\.json|\.idea/(?:tasks|workspace)\.xml)(?:$|[^a-zA-Z0-9_-])",
-            tok,
             re.IGNORECASE,
         )
     )
@@ -739,19 +744,16 @@ def _check_shell_token_for_violations(
     if _matches_git_config_token(tok):
         return f"Direct manipulation of Git configuration '{tok}' is forbidden."
 
-    if re.search(r"(?:^|[^a-zA-Z0-9_-])/mnt/(lower|overlays)(?:$|[^a-zA-Z0-9_-])", tok):
-        return f"Direct access to internal overlay mount directories '{tok}' is forbidden."
-
     if _matches_protected_sandbox_state_token(tok):
         return f"Direct manipulation of protected sandbox state '{tok}' is forbidden."
 
-    if _matches_customization_token(tok):
+    if CUSTOMIZATION_TOKEN_RE.search(tok):
         return f"Modifying agent customization or hook configuration '{tok}' is forbidden."
 
-    if _matches_cicd_or_repo_meta_token(tok):
+    if CICD_OR_META_TOKEN_RE.search(tok):
         return f"Modifying protected CI/CD or repository metadata path '{tok}' is forbidden."
 
-    if _matches_ide_config_token(tok):
+    if IDE_EXEC_TOKEN_RE.search(tok):
         return f"Modifying IDE host-execution configuration '{tok}' is forbidden."
 
     if _find_secret_env_reference(tok):

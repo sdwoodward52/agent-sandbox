@@ -255,26 +255,16 @@ Place the Linux ARM64 'agy' binary in '${SANDBOX_ROOT}/vendor/agy' (chmod +x) or
     if [[ -n "${remote_url}" ]]; then
       ok "Headless session '${session_name}' (project: ${rname}) is running in the background."
       ok "Antigravity Remote Web URL: ${remote_url}"
-      if command -v open &>/dev/null && [[ "${AGY_NO_BROWSER:-false}" != "true" ]]; then
-        if [[ "${app_mode}" == "true" ]]; then
-          info "Opening chromeless macOS App Window for Antigravity Remote Web UI..."
-          open_chrome_app_window "${remote_url}" "${STATE_DIR}/chrome-app-chat"
-        else
-          open "${remote_url}"
-        fi
+      if [[ "${app_mode}" == "true" && "${AGY_NO_BROWSER:-false}" != "true" ]]; then
+        info "Opening chromeless macOS App Window for Antigravity Remote Web UI..."
       fi
+      open_ui_url "${remote_url}" "${app_mode}" "${STATE_DIR}/chrome-app-chat"
       info "Run 'agy-workflow chat' to reopen the web UI, 'agy-url' inside the IDE terminal, or 'agy-workflow chat --tui' for TUI."
     elif [[ -n "${auth_url}" ]] || is_auth_needed "${rname}"; then
       warn "Antigravity CLI is not yet authenticated in agy-agent-sandbox."
       if [[ -n "${auth_url}" ]]; then
         ok "Authentication URL: ${auth_url}"
-        if command -v open &>/dev/null && [[ "${AGY_NO_BROWSER:-false}" != "true" ]]; then
-          if [[ "${app_mode}" == "true" ]]; then
-            open_chrome_app_window "${auth_url}" "${STATE_DIR}/chrome-app-chat"
-          else
-            open "${auth_url}"
-          fi
-        fi
+        open_ui_url "${auth_url}" "${app_mode}" "${STATE_DIR}/chrome-app-chat"
       fi
       info "Run 'agy-sandbox auth' in your terminal to complete sign-in interactively."
     else

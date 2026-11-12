@@ -17,9 +17,9 @@ import urllib.request
 
 DEFAULT_CHAIN = [
     m.strip()
-    for m in os.environ.get(
-        "AGY_AUTOCOMPLETE_FALLBACK_MODELS",
-        "gemini-3.1-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest,gemini-3.6-flash,gemini-3.5-flash,gemini-flash-latest",
+    for m in (
+        os.environ.get("AGY_AUTOCOMPLETE_FALLBACK_MODELS")
+        or "gemini-3.1-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest,gemini-3.6-flash,gemini-3.5-flash,gemini-flash-latest"
     ).split(",")
     if m.strip()
 ]
@@ -111,13 +111,8 @@ class FallbackHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: object) -> None:
-        line = "[agy-gemini-fallback] " + (fmt % args) + "\n"
-        sys.stderr.write(line)
-        try:
-            with open("/tmp/agy-gemini-fallback.log", "a", encoding="utf-8") as lf:
-                lf.write(line)
-        except Exception:
-            pass
+        sys.stderr.write("[agy-gemini-fallback] " + (fmt % args) + "\n")
+        sys.stderr.flush()
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
